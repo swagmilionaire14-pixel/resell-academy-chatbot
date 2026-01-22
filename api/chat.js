@@ -16,10 +16,19 @@ export default async function handler(req, res) {
         "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`
       },
       body: JSON.stringify({
-        model: "gpt-4.1-mini",
-        input: message
-      })
-    });
+  model: "gpt-4.1-mini",
+  input: [
+    {
+      role: "system",
+      content: "Tu es le chatbot officiel de Resell Academy. Réponds clairement et utilement."
+    },
+    {
+      role: "user",
+      content: message
+    }
+  ]
+})
+
 
     const data = await response.json();
 
