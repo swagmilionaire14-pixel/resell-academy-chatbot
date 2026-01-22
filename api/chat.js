@@ -21,7 +21,7 @@ export default async function handler(req, res) {
       },
       body: JSON.stringify({
         // Modèle conseillé “généraliste” (tu peux changer ensuite)
-        model: "claude-3-5-sonnet-latest",
+        model: "claude-3-haiku-20240307",
         max_tokens: 500,
         messages: [
           {
