@@ -27,8 +27,7 @@ export default async function handler(req, res) {
       content: message
     }
   ]
-})
-
+});
 
     const data = await response.json();
 
