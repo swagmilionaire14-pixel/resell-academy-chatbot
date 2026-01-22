@@ -24,8 +24,10 @@ export default async function handler(req, res) {
     const data = await response.json();
 
     const reply =
-      data.output_text ||
-      "Désolé, je n’ai pas compris. Peux-tu reformuler ?";
+  data.output_text ||
+  data.output?.[0]?.content?.[0]?.text ||
+  "Désolé, je n’ai pas compris. Peux-tu reformuler ?";
+
 
     res.status(200).json({ reply });
   } catch (error) {
