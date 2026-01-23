@@ -1,153 +1,184 @@
+// /api/chat.js
 import fs from "fs";
 import path from "path";
 
-let cachedKnowledge = null;
-let cachedKnowledgeMtimeMs = 0;
+const ALLOWED_ORIGINS = new Set([
+  "https://resell-academy.com",
+  "https://www.resell-academy.com",
+  "https://payhip.com",
+  "https://www.payhip.com",
+]);
 
-// Rate limit très simple en mémoire (OK pour débuter)
-const RATE = {
-  windowMs: 60_000, // 1 minute
-  max: 20,          // 20 requêtes / minute / IP
-};
-const ipHits = new Map(); // ip -> { count, resetAt }
+/**
+ * Petit rate limit en mémoire (ok pour MVP).
+ * Si tu veux solide en prod: Upstash Redis / Vercel KV.
+ */
+const RL_WINDOW_MS = 60_000;
+const RL_MAX_REQ = 20;
+const rlMap = new Map();
 
 function getClientIp(req) {
-  const xff = req.headers["x-forwarded-for"];
-  if (typeof xff === "string" && xff.length) return xff.split(",")[0].trim();
+  const xf = req.headers["x-forwarded-for"];
+  if (typeof xf === "string" && xf.length) return xf.split(",")[0].trim();
   return req.socket?.remoteAddress || "unknown";
 }
 
 function rateLimit(req) {
   const ip = getClientIp(req);
   const now = Date.now();
-  const hit = ipHits.get(ip);
+  const entry = rlMap.get(ip) || { count: 0, start: now };
 
-  if (!hit || now > hit.resetAt) {
-    ipHits.set(ip, { count: 1, resetAt: now + RATE.windowMs });
-    return { ok: true };
+  if (now - entry.start > RL_WINDOW_MS) {
+    entry.count = 0;
+    entry.start = now;
   }
 
-  hit.count += 1;
-  if (hit.count > RATE.max) {
-    return { ok: false, retryAfterSec: Math.ceil((hit.resetAt - now) / 1000) };
-  }
-  return { ok: true };
-}
+  entry.count += 1;
+  rlMap.set(ip, entry);
 
-function isAllowedOrigin(origin) {
-  if (!origin) return false;
+  const remaining = Math.max(0, RL_MAX_REQ - entry.count);
+  const retryAfterSec = Math.ceil((RL_WINDOW_MS - (now - entry.start)) / 1000);
 
-  // Mets ici TES domaines exacts (avec https)
-  const ALLOWED = new Set([
-    "https://resell-academy.com",
-    "https://www.resell-academy.com",
-
-    // Payhip (parfois le checkout / assets passent par là)
-    "https://payhip.com",
-    "https://www.payhip.com",
-  ]);
-
-  // Autoriser aussi les sous-domaines *.payhip.com si besoin
-  try {
-    const u = new URL(origin);
-    if (ALLOWED.has(origin)) return true;
-    if (u.hostname.endsWith(".payhip.com")) return true;
-  } catch (_) {
-    return false;
-  }
-
-  return false;
+  return {
+    ok: entry.count <= RL_MAX_REQ,
+    remaining,
+    retryAfterSec,
+  };
 }
 
 function setCors(req, res) {
   const origin = req.headers.origin;
-
-  // Si origin est autorisé, on le renvoie (sinon on ne met rien)
-  if (origin && isAllowedOrigin(origin)) {
+  if (origin && ALLOWED_ORIGINS.has(origin)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Vary", "Origin");
-    res.setHeader("Access-Control-Allow-Credentials", "false");
   }
-
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Max-Age", "86400");
 }
 
 function loadKnowledge() {
-  // On essaye plusieurs chemins possibles pour être robuste
-  const candidates = [
-    path.join(process.cwd(), "api", "knowledge", "ra_knowledge.txt"),     // ton cas (capture GitHub)
-    path.join(process.cwd(), "knowledge", "ra_knowledge.txt"),
-    path.join(process.cwd(), "public", "ra_knowledge.txt"),
-  ];
+  try {
+    // Chemin: /api/knowledge/ra_knowledge.txt (comme ton repo)
+    const kbPath = path.join(process.cwd(), "api", "knowledge", "ra_knowledge.txt");
+    const text = fs.readFileSync(kbPath, "utf8");
+    return { text, warning: null };
+  } catch (e) {
+    return { text: "", warning: "Knowledge file not found or unreadable." };
+  }
+}
 
-  let filePath = null;
-  for (const p of candidates) {
-    if (fs.existsSync(p)) {
-      filePath = p;
-      break;
-    }
+/**
+ * Catalogue des cards (MVP).
+ * IMPORTANT:
+ * - Pour “Ajouter au panier” sans redirection, il te faut le data-product Payhip de chaque pack.
+ * - Pour l’instant on met payhipProductId: null => le bouton redirige vers l’URL.
+ */
+const PRODUCT_CARDS = {
+  accessoires: {
+    key: "accessoires",
+    name: "Pack Accessoires Luxe",
+    price: "Voir prix",
+    url: "https://resell-academy.com/b/accessoires",
+    cover: "https://cdn.shopify.com/s/files/1/0973/2368/0110/files/COVER_PACK_ACCESSOIRES.jpg?v=1769183567",
+    payhipProductId: null, // <-- mets l’ID Payhip quand tu l’as (data-product="XXXXX")
+  },
+  vetements: {
+    key: "vetements",
+    name: "Pack Vêtements",
+    price: "Voir prix",
+    url: "https://resell-academy.com/b/vetements",
+    cover: "https://cdn.shopify.com/s/files/1/0973/2368/0110/files/COVER_PACK_VETEMENTS.jpg?v=1769183578",
+    payhipProductId: null,
+  },
+  chaussures: {
+    key: "chaussures",
+    name: "Pack Chaussures",
+    price: "Voir prix",
+    url: "https://resell-academy.com/b/chaussures",
+    cover: "https://cdn.shopify.com/s/files/1/0973/2368/0110/files/COVER_PACK_CHAUSSURES.jpg?v=1769183578",
+    payhipProductId: null,
+  },
+  parfums: {
+    key: "parfums",
+    name: "Pack Parfums",
+    price: "Voir prix",
+    url: "https://resell-academy.com/b/parfums",
+    cover: "https://cdn.shopify.com/s/files/1/0973/2368/0110/files/pack_parfums.jpg?v=1769183588",
+    payhipProductId: null,
+  },
+  tech: {
+    key: "tech",
+    name: "Pack Tech",
+    price: "Voir prix",
+    url: "https://resell-academy.com/b/tech",
+    cover: "https://cdn.shopify.com/s/files/1/0973/2368/0110/files/Copy_of_Copy_of_COVER_PACK_CHAUSSURES.jpg?v=1769183564",
+    payhipProductId: null,
+  },
+  bundle: {
+    key: "bundle",
+    name: "Giga Bundle",
+    price: "Voir prix",
+    url: "https://resell-academy.com/b/giga-bundle",
+    cover: "https://cdn.shopify.com/s/files/1/0973/2368/0110/files/COVER_GIGA_BUNDLE_V2_GIF.png?v=1769183604",
+    payhipProductId: null,
+  },
+  blueprint: {
+    key: "blueprint",
+    name: "Resell Blueprint",
+    price: "15€",
+    url: "https://resell-academy.com/b/OmtC5",
+    cover: "https://cdn.shopify.com/s/files/1/0973/2368/0110/files/COVER_SECONDAIRE_RESELL_BLUEPRINT.jpg?v=1769183606",
+    payhipProductId: null,
+  },
+};
+
+function shouldSuggestCards(userText) {
+  const t = userText.toLowerCase();
+
+  // 1) Cas “je ne sais pas quel pack choisir / conseille-moi”
+  if (
+    t.includes("quel pack") ||
+    t.includes("tu me conseilles") ||
+    t.includes("tu recommandes") ||
+    t.includes("je commence") ||
+    t.includes("débutant") ||
+    t.includes("par où commencer")
+  ) return { type: "single", key: "accessoires" };
+
+  // 2) Cas “packs disponibles / liste des packs”
+  if (t.includes("packs") || t.includes("bundle") || t.includes("giga")) {
+    return { type: "all" };
   }
 
-  if (!filePath) {
-    return {
-      text: "",
-      warning:
-        "Knowledge file not found. Expected api/knowledge/ra_knowledge.txt (or /knowledge or /public).",
-    };
-  }
+  // 3) Mention explicite d’un pack
+  if (t.includes("accessoire")) return { type: "single", key: "accessoires" };
+  if (t.includes("vêtement")) return { type: "single", key: "vetements" };
+  if (t.includes("chauss")) return { type: "single", key: "chaussures" };
+  if (t.includes("parfum")) return { type: "single", key: "parfums" };
+  if (t.includes("tech")) return { type: "single", key: "tech" };
+  if (t.includes("blueprint")) return { type: "single", key: "blueprint" };
+  if (t.includes("giga")) return { type: "single", key: "bundle" };
 
-  const stat = fs.statSync(filePath);
-
-  // Cache : si le fichier n’a pas changé, on réutilise
-  if (cachedKnowledge && stat.mtimeMs === cachedKnowledgeMtimeMs) {
-    return { text: cachedKnowledge, warning: null };
-  }
-
-  const text = fs.readFileSync(filePath, "utf8");
-  cachedKnowledge = text;
-  cachedKnowledgeMtimeMs = stat.mtimeMs;
-
-  return { text, warning: null };
+  return null;
 }
 
 export default async function handler(req, res) {
-  // 1) CORS
   setCors(req, res);
 
-  // 2) Preflight
+  // Preflight
   if (req.method === "OPTIONS") {
     return res.status(204).end();
   }
 
-  // 3) POST only
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  // 4) Bloquer les appels hors site (Origin/Referer)
-  // Payhip / navigateur met souvent Origin. Sinon on tombe sur Referer.
-  const origin = req.headers.origin;
-  const referer = req.headers.referer;
-
-  const originOk = origin ? isAllowedOrigin(origin) : false;
-  const refererOk = (() => {
-    if (!referer) return false;
-    try {
-      const u = new URL(referer);
-      const refOrigin = `${u.protocol}//${u.host}`;
-      return isAllowedOrigin(refOrigin);
-    } catch (_) {
-      return false;
-    }
-  })();
-
-  if (!originOk && !refererOk) {
-    return res.status(403).json({ error: "Forbidden" });
-  }
-
-  // 5) Rate limit
+  // Rate limit
   const rl = rateLimit(req);
+  res.setHeader("X-RateLimit-Limit", String(RL_MAX_REQ));
+  res.setHeader("X-RateLimit-Remaining", String(rl.remaining));
   if (!rl.ok) {
     res.setHeader("Retry-After", String(rl.retryAfterSec));
     return res.status(429).json({
@@ -163,35 +194,37 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "No message provided" });
     }
 
-    // Garde-fous
     const trimmed = message.trim();
-    if (trimmed.length < 1) {
-      return res.status(400).json({ error: "Empty message" });
-    }
-    if (trimmed.length > 1200) {
-      return res.status(400).json({ error: "Message too long" });
-    }
+    if (!trimmed) return res.status(400).json({ error: "Empty message" });
+    if (trimmed.length > 1200) return res.status(400).json({ error: "Message too long" });
 
     const { text: knowledgeText, warning } = loadKnowledge();
 
-    // SYSTEM = ton ton + tes règles + la KB
     const system = `
 Tu es le chatbot officiel de Resell Academy.
-Ton style: pro mais familial, chaleureux, clair, orienté aide.
-Si tu n'es pas sûr à 100% d'une info, dis-le et propose de contacter le support.
 
-Règles support:
-- Tous les produits sont 100% digitaux, accès immédiat après paiement.
-- Si question non couverte: proposer support@resell-academy.com.
-- Politique remboursement: si téléchargement effectué => pas de remboursement (sauf cas achat double / fraude / etc. selon KB).
-
-IMPORTANT:
+Règles de style:
 - Réponds en français par défaut.
-- Réponses courtes, actionnables, pas de blabla.
+- Ton: pro mais familial, proche, rassurant.
+- Réponses courtes et actionnables (sauf question complexe).
+- Si tu n'es pas sûr à 100%: ne devine pas, propose support@resell-academy.com.
+
+Infos clés:
+- Produits 100% digitaux. Accès immédiat après paiement + lien de téléchargement sur le site + email PayHip (reçu / accès).
+- Si email non reçu: vérifier spams/promotions + rechercher "PayHip" + vérifier l'email de paiement. Sinon support@resell-academy.com.
+- Remboursements: si le contenu a été téléchargé => pas de remboursement (sauf cas achat double / achat non autorisé selon KB).
+- Délais (fournisseurs): 7 à 13 jours selon pays.
+- Les liens dans les packs ne sont pas des contacts WhatsApp: ce sont des liens produits DHGate / CNFans.
+- Quand tu parles du créateur, utilise "Space Resell".
+
+UI Cards (très important):
+- N'affiche PAS de cartes sans raison.
+- Affiche une carte seulement si l'utilisateur demande une recommandation de pack, les packs disponibles, ou montre une intention d'achat.
+- Si l'utilisateur demande "quel pack tu recommandes pour commencer", recommande toujours le Pack Accessoires Luxe (budget bas + facile pour débuter).
 
 KNOWLEDGE BASE (source de vérité):
-${knowledgeText || "(KB vide pour le moment)"}
-`.trim();
+${knowledgeText || "(KB vide)"} 
+    `.trim();
 
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -219,10 +252,30 @@ ${knowledgeText || "(KB vide pour le moment)"}
     }
 
     const data = await response.json();
-    const reply = data?.content?.[0]?.text || "Désolé, je n’ai pas compris. Peux-tu reformuler ?";
+    const reply =
+      data?.content?.[0]?.text ||
+      "Désolé, je n’ai pas compris. Peux-tu reformuler ?";
+
+    // Cards logic (MVP deterministic to avoid spam)
+    const cardPlan = shouldSuggestCards(trimmed);
+    let cards = [];
+    if (cardPlan?.type === "single" && PRODUCT_CARDS[cardPlan.key]) {
+      cards = [PRODUCT_CARDS[cardPlan.key]];
+    } else if (cardPlan?.type === "all") {
+      cards = [
+        PRODUCT_CARDS.accessoires,
+        PRODUCT_CARDS.chaussures,
+        PRODUCT_CARDS.vetements,
+        PRODUCT_CARDS.parfums,
+        PRODUCT_CARDS.tech,
+        PRODUCT_CARDS.bundle,
+        PRODUCT_CARDS.blueprint,
+      ];
+    }
 
     return res.status(200).json({
       reply,
+      cards, // <= nouveau
       kbWarning: warning || null,
     });
   } catch (error) {
