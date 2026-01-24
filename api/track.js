@@ -1,12 +1,6 @@
-// api/track.js — Resell Academy Chat Analytics Ingestion (Supabase)
-// One-shot replacement (copy/paste total)
+// api/track.js — Resell Academy Chat Analytics Ingestion (Supabase) — PayHip-proof
+// Copy/paste total
 
-const ALLOWED_ORIGINS = new Set([
-  "https://resell-academy.com",
-  "https://www.resell-academy.com",
-]);
-
-// Allowlist events (prevents garbage)
 const ALLOWED_EVENTS = new Set([
   "page_view",
   "page_unload",
@@ -28,16 +22,16 @@ const ALLOWED_EVENTS = new Set([
   "error_client",
 ]);
 
-// Basic in-memory rate limit per instance
+// Basic in-memory rate limit per serverless instance
 const RL_WINDOW_MS = 60_000;
-const RL_MAX_EVENTS = 120; // per minute per client
+const RL_MAX_EVENTS = 180;
 const buckets = new Map();
 
 function setCors(req, res) {
-  const origin = req.headers.origin || "";
-  const allowOrigin = ALLOWED_ORIGINS.has(origin) ? origin : "https://resell-academy.com";
-
-  res.setHeader("Access-Control-Allow-Origin", allowOrigin);
+  const origin = req.headers.origin || "*";
+  // PayHip can use different origins (custom domain, payhip pages, previews).
+  // We reflect the origin to avoid CORS issues.
+  res.setHeader("Access-Control-Allow-Origin", origin);
   res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -81,9 +75,8 @@ function safeStr(v, max = 500) {
 function safeJson(v) {
   if (!v || typeof v !== "object") return {};
   try {
-    // keep it small; drop huge payloads
     const s = JSON.stringify(v);
-    if (s.length > 5000) return { _trimmed: true };
+    if (s.length > 7000) return { _trimmed: true };
     return v;
   } catch {
     return {};
@@ -144,12 +137,6 @@ export default async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
-  // Optional origin gate (recommended)
-  const origin = req.headers.origin || "";
-  if (origin && !ALLOWED_ORIGINS.has(origin)) {
-    return res.status(403).json({ error: "Forbidden origin" });
-  }
-
   const rl = rateLimit(req);
   res.setHeader("X-RateLimit-Limit", String(RL_MAX_EVENTS));
   res.setHeader("X-RateLimit-Remaining", String(rl.remaining));
@@ -160,25 +147,20 @@ export default async function handler(req, res) {
 
   try {
     const body = req.body || {};
-    let rawEvents = [];
+    const rawEvents = Array.isArray(body.batch) ? body.batch : [body];
 
-    if (Array.isArray(body.batch)) rawEvents = body.batch;
-    else rawEvents = [body];
-
-    // Normalize + validate
     const events = rawEvents
-      .slice(0, 25) // hard cap per request
+      .slice(0, 25)
       .map(normalizeEvent)
       .filter(Boolean);
 
     if (!events.length) {
-      return res.status(200).json({ ok: true, inserted: 0 });
+      return res.status(200).json({ ok: true, inserted: 0, rejected: rawEvents.length });
     }
 
     await insertEventsToSupabase(events);
-    return res.status(200).json({ ok: true, inserted: events.length });
+    return res.status(200).json({ ok: true, inserted: events.length, rejected: rawEvents.length - events.length });
   } catch (e) {
     return res.status(500).json({ error: "Track server error", details: String(e).slice(0, 400) });
   }
 }
-
