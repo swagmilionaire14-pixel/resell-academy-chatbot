@@ -1,16 +1,15 @@
-// api/chat.js — Resell Academy Chat API (KB v3 + promo/support/FAQ aligned)
+// api/chat.js — Resell Academy Chat API (KB v3 aligned + KB loader fix + debug)
 // One-shot replacement (copy/paste total).
 //
-// Key guarantees:
-// - Never invent products: only official list.
-// - Short, mentor tone (2–6 lines, 1 paragraph by default).
-// - Cards are NOT spammed (KB rules).
-// - Support/FAQ URLs are correct.
-// - Promo codes are explicit (provided by owner) and only surfaced when relevant.
-// - Adds actions: link + copy (for coupon UX in widget).
+// Fixes:
+// - KB loader now searches multiple possible file paths/names (prevents "KB not taken into account").
+// - Adds kbStatus/kbSource/kbDigest to API response for debugging deployments.
+// - Tightens anti-hallucination when KB missing.
+// - Supports promo/support/FAQ + actions[] (link/copy) + card anti-spam rules.
 
 import fs from "fs";
 import path from "path";
+import crypto from "crypto";
 
 const ALLOWED_ORIGINS = new Set([
   "https://resell-academy.com",
@@ -36,8 +35,8 @@ const PROMOS = {
   NEW10: {
     code: "NEW10",
     label: "NEW10",
-    description: "-10% sur le premier pack",
-    appliesTo: "packs_only", // (hors Giga Bundle)
+    description: "-10% de réduction sur le premier pack",
+    appliesTo: "packs_only",
   },
   GIGA15: {
     code: "GIGA15",
@@ -97,17 +96,69 @@ function rateLimit(req) {
 }
 
 /** ---------------------------
- * Knowledge loader (optional file)
+ * Knowledge loader (multi-path + digest)
+ * - This is the #1 cause of "I updated KB but bot ignores it"
  * --------------------------*/
-function loadKnowledge() {
+function sha1(text) {
+  return crypto.createHash("sha1").update(text || "", "utf8").digest("hex");
+}
+
+function readIfExists(absPath) {
   try {
-    const filePath = path.join(process.cwd(), "api", "knowledge", "ra_knowledge.txt");
-    const text = fs.readFileSync(filePath, "utf8");
-    if (!text || !text.trim()) return { text: "", warning: "KB file empty" };
-    return { text, warning: null };
+    if (!absPath) return null;
+    if (!fs.existsSync(absPath)) return null;
+    const text = fs.readFileSync(absPath, "utf8");
+    if (!text || !text.trim()) return { text: "", source: absPath, empty: true };
+    return { text, source: absPath, empty: false };
   } catch {
-    return { text: "", warning: "KB file not found/readable" };
+    return null;
   }
+}
+
+function loadKnowledge() {
+  // Optional: allow override via env var
+  // Example: KB_PATH="api/knowledge/knowledge.txt"
+  const envPath = process.env.KB_PATH
+    ? path.isAbsolute(process.env.KB_PATH)
+      ? process.env.KB_PATH
+      : path.join(process.cwd(), process.env.KB_PATH)
+    : null;
+
+  const candidates = [
+    envPath,
+
+    // Previous path used in earlier code
+    path.join(process.cwd(), "api", "knowledge", "ra_knowledge.txt"),
+
+    // Common names people use
+    path.join(process.cwd(), "api", "knowledge", "knowledge.txt"),
+    path.join(process.cwd(), "knowledge.txt"),
+    path.join(process.cwd(), "knowlegde.txt"), // common typo
+    path.join(process.cwd(), "KNOWLEGDE CHATBOT.txt"), // if you kept this filename
+
+    // If you placed it next to api file
+    path.join(process.cwd(), "api", "knowledge.txt"),
+  ].filter(Boolean);
+
+  for (const p of candidates) {
+    const hit = readIfExists(p);
+    if (hit) {
+      const digest = sha1(hit.text || "");
+      return {
+        text: hit.text || "",
+        kbStatus: hit.empty ? "empty" : "ok",
+        kbSource: hit.source,
+        kbDigest: digest,
+      };
+    }
+  }
+
+  return {
+    text: "",
+    kbStatus: "missing",
+    kbSource: null,
+    kbDigest: sha1(""),
+  };
 }
 
 /** ---------------------------
@@ -125,7 +176,7 @@ const OFFICIAL_PRODUCTS = [
 
 /** ---------------------------
  * Product cards (deterministic)
- * Price intentionally set to "Voir prix" to avoid hallucinating prices.
+ * Price intentionally "Voir prix" to avoid inventing prices.
  * --------------------------*/
 const PRODUCT_CARDS = {
   accessoires: {
@@ -204,14 +255,15 @@ function detectIntent(userTextRaw) {
   const t = norm(userTextRaw);
 
   const intent = {
+    raw: userTextRaw,
     wantsSupport: includesAny(t, ["support", "contact", "aide", "probleme", "bug", "erreur", "404"]),
-    wantsFaq: includesAny(t, ["faq", "question", "questions", "comment ca marche", "comment ca fonctionne"]),
+    wantsFaq: includesAny(t, ["faq", "questions", "question", "comment ca marche", "comment ca fonctionne"]),
     wantsPromo: includesAny(t, ["code promo", "promo", "reduction", "reduc", "coupon", "remise", "discount"]),
     asksAvailablePacks: includesAny(t, ["quels packs", "packs disponibles", "tu vends quoi", "quelles offres", "quels produits"]),
     wantsAllCards: includesAny(t, ["montre tout", "toutes les offres", "toutes les cartes", "tous les packs", "tout afficher"]),
     wantsRecommendation: includesAny(t, ["tu recommandes", "recommande", "conseilles", "quel pack choisir", "par ou commencer", "debutant", "debut"]),
     mentions: {
-      accessoires: includesAny(t, ["accessoire", "accessoires", "luxe accessoire"]),
+      accessoires: includesAny(t, ["accessoire", "accessoires"]),
       vetements: includesAny(t, ["vetement", "vetements", "vêtement", "vêtements"]),
       chaussures: includesAny(t, ["chaussure", "chaussures", "sneaker", "baskets"]),
       parfums: includesAny(t, ["parfum", "parfums", "fragrance"]),
@@ -219,7 +271,7 @@ function detectIntent(userTextRaw) {
       bundle: includesAny(t, ["giga", "bundle", "giga bundle"]),
       blueprint: includesAny(t, ["blueprint", "ebook", "e-book", "livre", "guide"]),
     },
-    purchaseSignals: includesAny(t, ["prix", "acheter", "achat", "lien", "ou acheter", "comment je prends", "checkout", "payer", "cart"]),
+    purchaseSignals: includesAny(t, ["prix", "acheter", "achat", "lien", "ou acheter", "comment je prends", "checkout", "payer", "panier", "cart"]),
   };
 
   return intent;
@@ -229,57 +281,35 @@ function detectIntent(userTextRaw) {
  * Card rules (KB v3)
  * --------------------------*/
 function planCards(intent) {
-  // A) Recommendation => always Pack Accessoires Luxe + its card
-  if (intent.wantsRecommendation) {
-    return { mode: "single", keys: ["accessoires"] };
-  }
+  if (intent.wantsRecommendation) return { keys: ["accessoires"] };
 
-  // B) Pack specific question + purchase intent => send that pack card
   const packKeys = Object.keys(intent.mentions).filter((k) => intent.mentions[k]);
-  if (packKeys.length === 1 && intent.purchaseSignals) {
-    return { mode: "single", keys: [packKeys[0]] };
-  }
+  if (packKeys.length === 1 && intent.purchaseSignals) return { keys: [packKeys[0]] };
 
-  // C) "Quels packs" => list + up to 1–3 cards, unless explicit all
   if (intent.asksAvailablePacks) {
     if (intent.wantsAllCards) {
-      return {
-        mode: "all",
-        keys: ["accessoires", "chaussures", "vetements", "parfums", "tech", "bundle", "blueprint"],
-      };
+      return { keys: ["accessoires", "chaussures", "vetements", "parfums", "tech", "bundle", "blueprint"] };
     }
-    // Default: 3 best “commercially safe” cards (beginner-friendly + flagship)
-    return { mode: "multi", keys: ["accessoires", "bundle", "blueprint"] };
+    return { keys: ["accessoires", "bundle", "blueprint"] }; // max 1–3
   }
 
-  // Promo path: if user is asking promo AND mentions giga/bundle => include bundle card
-  if (intent.wantsPromo && (intent.mentions.bundle || norm("").includes("giga"))) {
-    return { mode: "single", keys: ["bundle"] };
-  }
+  // Promo + giga mention => bundle card
+  if (intent.wantsPromo && intent.mentions.bundle) return { keys: ["bundle"] };
 
-  // Otherwise: no cards
-  return { mode: "none", keys: [] };
+  return { keys: [] };
 }
 
 /** ---------------------------
- * Actions builder
- * - link actions: open URL
- * - copy actions: copy code to clipboard (widget should implement)
+ * Actions builder (link + copy)
  * --------------------------*/
 function buildActions(intent) {
   const actions = [];
 
-  if (intent.wantsSupport) {
-    actions.push({ type: "link", label: "Contacter le support", url: URLS.SUPPORT });
-  }
-
-  if (intent.wantsFaq) {
-    actions.push({ type: "link", label: "Voir la FAQ", url: URLS.FAQ });
-  }
+  if (intent.wantsSupport) actions.push({ type: "link", label: "Contacter le support", url: URLS.SUPPORT });
+  if (intent.wantsFaq) actions.push({ type: "link", label: "Voir la FAQ", url: URLS.FAQ });
 
   if (intent.wantsPromo) {
-    // If user mentions Giga Bundle => prioritize GIGA15
-    if (intent.mentions.bundle || includesAny(norm(intent.raw || ""), ["giga", "bundle"])) {
+    if (intent.mentions.bundle) {
       actions.push({
         type: "copy",
         label: `Copier ${PROMOS.GIGA15.label}`,
@@ -294,7 +324,6 @@ function buildActions(intent) {
         value: PROMOS.NEW10.code,
         description: PROMOS.NEW10.description,
       });
-      // optional: no forced product link to avoid spam
     }
   }
 
@@ -302,25 +331,18 @@ function buildActions(intent) {
 }
 
 /** ---------------------------
- * Deterministic promo reply (prevents model from inventing other codes)
+ * Deterministic replies (anti-hallucination zones)
  * --------------------------*/
 function buildPromoReply(intent) {
   if (!intent.wantsPromo) return null;
-
-  // If asking promo and mentions Giga Bundle => show GIGA15 primarily + mention NEW10 secondarily
   if (intent.mentions.bundle) {
-    return `Oui : code ${PROMOS.GIGA15.code} (${PROMOS.GIGA15.description}). Si tu prends plutôt un pack individuel, tu as aussi ${PROMOS.NEW10.code} (${PROMOS.NEW10.description}).`;
+    return `Oui : code ${PROMOS.GIGA15.code} (${PROMOS.GIGA15.description}). Pour un pack individuel, tu as aussi ${PROMOS.NEW10.code} (${PROMOS.NEW10.description}).`;
   }
-  // Default: show both succinctly
   return `Oui : ${PROMOS.NEW10.code} (${PROMOS.NEW10.description}) et ${PROMOS.GIGA15.code} (${PROMOS.GIGA15.description}).`;
 }
 
-/** ---------------------------
- * Deterministic “available packs” reply (never invent)
- * --------------------------*/
 function buildAvailablePacksReply(intent) {
   if (!intent.asksAvailablePacks) return null;
-
   return `Les seuls produits disponibles sont : Pack Parfums, Pack Tech, Pack Accessoires Luxe, Pack Chaussures, Pack Vêtements, le Giga Bundle (tous les packs + bonus) et le Resell Blueprint.`;
 }
 
@@ -363,9 +385,7 @@ export default async function handler(req, res) {
 
   try {
     const { message, history } = req.body || {};
-    if (!message || typeof message !== "string") {
-      return res.status(400).json({ error: "No message provided" });
-    }
+    if (!message || typeof message !== "string") return res.status(400).json({ error: "No message provided" });
 
     const trimmed = message.trim();
     if (!trimmed) return res.status(400).json({ error: "Empty message" });
@@ -385,32 +405,17 @@ export default async function handler(req, res) {
             )
         : [];
 
-    const { text: knowledgeText, warning } = loadKnowledge();
-
+    const kb = loadKnowledge();
     const intent = detectIntent(trimmed);
-    intent.raw = trimmed;
 
-    // Cards & actions are deterministic (KB rules)
-    const cardPlan = planCards(intent);
+    const cardsPlan = planCards(intent);
+    const cards = (cardsPlan.keys || []).map((k) => PRODUCT_CARDS[k]).filter(Boolean);
     const actions = buildActions(intent);
 
-    const cards =
-      cardPlan.mode === "none"
-        ? []
-        : cardPlan.keys.map((k) => PRODUCT_CARDS[k]).filter(Boolean);
-
-    // Deterministic replies for critical “no-hallucination” zones
+    // Deterministic answers for sensitive areas
     const promoReply = buildPromoReply(intent);
     const packsReply = buildAvailablePacksReply(intent);
 
-    // If promo/packs/support/faq are the main ask, answer deterministically (short).
-    // Otherwise, use model with strict system constraints + KB context.
-    const deterministicReply =
-      promoReply || packsReply
-        ? (promoReply || packsReply)
-        : null;
-
-    // If user asks only support/faq (and not packs/promo), keep it short and don’t call model.
     const isPureSupport =
       (intent.wantsSupport || intent.wantsFaq) &&
       !intent.asksAvailablePacks &&
@@ -421,71 +426,78 @@ export default async function handler(req, res) {
     if (isPureSupport) {
       const reply = intent.wantsFaq
         ? `Je te mets la FAQ ici : ${URLS.FAQ}. Si ta question n’y est pas, tu peux nous contacter ici : ${URLS.SUPPORT}.`
-        : `Tu peux contacter le support ici : ${URLS.SUPPORT}. Si tu veux, la FAQ est là aussi : ${URLS.FAQ}.`;
+        : `Tu peux contacter le support ici : ${URLS.SUPPORT}. La FAQ est là : ${URLS.FAQ}.`;
 
-      await logEvent({
-        type: "message",
-        origin: origin || null,
-        session: req.headers["x-ra-session"] || null,
-        user: trimmed,
-        hasCards: cards.length > 0,
-        mode: "deterministic_support",
-      });
+      await logEvent({ type: "message", mode: "det_support", kbStatus: kb.kbStatus, kbSource: kb.kbSource });
 
       return res.status(200).json({
         reply,
         cards,
         actions,
-        kbWarning: warning || null,
+        kbStatus: kb.kbStatus,
+        kbSource: kb.kbSource,
+        kbDigest: kb.kbDigest,
       });
     }
 
-    // If deterministic reply exists (promo/packs), return it without model (safer).
-    if (deterministicReply) {
-      await logEvent({
-        type: "message",
-        origin: origin || null,
-        session: req.headers["x-ra-session"] || null,
-        user: trimmed,
-        hasCards: cards.length > 0,
-        mode: "deterministic_core",
-      });
+    if (promoReply || packsReply) {
+      const reply = promoReply || packsReply;
+      await logEvent({ type: "message", mode: "det_core", kbStatus: kb.kbStatus, kbSource: kb.kbSource });
 
       return res.status(200).json({
-        reply: deterministicReply,
+        reply,
         cards,
         actions,
-        kbWarning: warning || null,
+        kbStatus: kb.kbStatus,
+        kbSource: kb.kbSource,
+        kbDigest: kb.kbDigest,
       });
     }
 
-    // --- Model path (kept, but hard-railed) ---
+    // If KB is missing/empty, do NOT allow "precise facts". Return safe response.
+    if (kb.kbStatus !== "ok") {
+      const reply =
+        `Je peux t’aider, mais je ne peux pas confirmer des infos précises car la base de connaissance n’est pas chargée côté serveur. ` +
+        `Le plus sûr : consulte la FAQ (${URLS.FAQ}) ou contacte le support (${URLS.SUPPORT}).`;
+
+      await logEvent({ type: "message", mode: "kb_missing_guard", kbStatus: kb.kbStatus, kbSource: kb.kbSource });
+
+      return res.status(200).json({
+        reply,
+        cards,
+        actions,
+        kbStatus: kb.kbStatus,
+        kbSource: kb.kbSource,
+        kbDigest: kb.kbDigest,
+      });
+    }
+
+    // --- Model path (hard-railed) ---
     const system = `
 Tu es le chatbot officiel de Resell Academy.
 
 STYLE
-- Réponds en français par défaut.
+- Réponds en français.
 - Ton: pro mais familial, mentor, rassurant.
-- Réponses courtes: 2 à 6 lignes max, 1 seul paragraphe si possible.
-- Si la question est complexe: réponds en 2–3 étapes compactes.
+- Réponse courte: 2 à 6 lignes, 1 paragraphe si possible.
 
-RÈGLES “ANTI-INVENTION”
+ANTI-INVENTION (STRICT)
 - Produits autorisés UNIQUEMENT: ${OFFICIAL_PRODUCTS.join(", ")}.
 - Ne jamais inventer un pack, un bonus, un prix, ou un code promo.
-- Si une info n’est pas dans la KB: dis-le clairement et propose la meilleure alternative (page produit / FAQ / support).
+- Si l’info n’est pas clairement dans la KB, dis: "Je ne vois pas cette info dans la base de connaissance" et renvoie vers FAQ/support.
 
 FAITS VALIDÉS
-- Tout est 100% digital: accès à un Google Sheet + un guide d’usage DHGate + CNFans. Aucun produit physique envoyé.
+- Tout est 100% digital: accès à un Google Sheet + un guide d’usage DHGate + CNFans.
 - DHGate: 7 à 13 jours selon pays.
-- CNFans: dépôt + photos qualité + choix/ paiement de l’expédition finale; délais variables, souvent dans une fourchette similaire selon pays/transport.
-- Space Resell = le créateur (personne). Resell Academy = business.
+- CNFans: dépôt + photos qualité + choix/paiement de l’expédition finale; délais variables.
+- Space Resell = créateur (personne). Resell Academy = business.
 - FAQ: ${URLS.FAQ}
 - Support: ${URLS.SUPPORT}
-- Codes promo disponibles (UNIQUEMENT ceux-ci): ${PROMOS.NEW10.code} (${PROMOS.NEW10.description}) et ${PROMOS.GIGA15.code} (${PROMOS.GIGA15.description}).
+- Codes promo (uniquement ceux-ci): ${PROMOS.NEW10.code} (${PROMOS.NEW10.description}) et ${PROMOS.GIGA15.code} (${PROMOS.GIGA15.description}).
 
 KNOWLEDGE BASE (source de vérité)
-${knowledgeText || "(KB vide)"}
-    `.trim();
+${kb.text}
+`.trim();
 
     const anthropicResp = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -497,6 +509,7 @@ ${knowledgeText || "(KB vide)"}
       body: JSON.stringify({
         model: "claude-3-haiku-20240307",
         max_tokens: 420,
+        temperature: 0.2,
         system,
         messages: [...safeHistory, { role: "user", content: trimmed }],
       }),
@@ -504,53 +517,43 @@ ${knowledgeText || "(KB vide)"}
 
     if (!anthropicResp.ok) {
       const errText = await anthropicResp.text();
-      await logEvent({
-        type: "error",
-        provider: "anthropic",
-        status: anthropicResp.status,
-        message: trimmed,
-      });
+      await logEvent({ type: "error", provider: "anthropic", status: anthropicResp.status });
+
       return res.status(500).json({
         error: "Anthropic API error",
         status: anthropicResp.status,
         details: errText,
-        kbWarning: warning || null,
+        kbStatus: kb.kbStatus,
+        kbSource: kb.kbSource,
+        kbDigest: kb.kbDigest,
       });
     }
 
     const data = await anthropicResp.json();
     let reply = data?.content?.[0]?.text || "Désolé, je n’ai pas compris. Peux-tu reformuler ?";
 
-    // Post-guard: if model mentions a non-official product name, neutralize (anti-hallucination).
-    // (Simple heuristic: if it contains "Pack" + unknown term, advise official list.)
-    const rNorm = norm(reply);
-    const mentionsPack = rNorm.includes("pack");
-    if (mentionsPack) {
-      const allowedTokens = OFFICIAL_PRODUCTS.map((p) => norm(p));
-      // If it says "pack" but none of the official packs are present, it may have invented.
-      const hasOfficial = allowedTokens.some((tok) => rNorm.includes(tok));
+    // Post-guard: if answer suggests non-official products, neutralize
+    const r = norm(reply);
+    if (r.includes("pack")) {
+      const allowed = OFFICIAL_PRODUCTS.map((p) => norm(p));
+      const hasOfficial = allowed.some((tok) => r.includes(tok));
       if (!hasOfficial && !intent.asksAvailablePacks) {
         reply =
           `Je préfère éviter de te donner une info au hasard. Les seuls produits officiels sont : ` +
           `Pack Parfums, Pack Tech, Pack Accessoires Luxe, Pack Chaussures, Pack Vêtements, ` +
-          `Giga Bundle et Resell Blueprint. Tu veux que je te recommande le meilleur pour commencer ?`;
+          `Giga Bundle et Resell Blueprint.`;
       }
     }
 
-    await logEvent({
-      type: "message",
-      origin: origin || null,
-      session: req.headers["x-ra-session"] || null,
-      user: trimmed,
-      hasCards: cards.length > 0,
-      mode: "model",
-    });
+    await logEvent({ type: "message", mode: "model", kbStatus: kb.kbStatus, kbSource: kb.kbSource });
 
     return res.status(200).json({
       reply,
       cards,
       actions,
-      kbWarning: warning || null,
+      kbStatus: kb.kbStatus,
+      kbSource: kb.kbSource,
+      kbDigest: kb.kbDigest,
     });
   } catch (error) {
     await logEvent({ type: "crash", details: String(error) });
