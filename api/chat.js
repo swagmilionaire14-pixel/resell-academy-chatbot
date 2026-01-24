@@ -1,12 +1,51 @@
-// api/chat.js
+// api/chat.js — Resell Academy Chat API (KB v3 + promo/support/FAQ aligned)
+// One-shot replacement (copy/paste total).
+//
+// Key guarantees:
+// - Never invent products: only official list.
+// - Short, mentor tone (2–6 lines, 1 paragraph by default).
+// - Cards are NOT spammed (KB rules).
+// - Support/FAQ URLs are correct.
+// - Promo codes are explicit (provided by owner) and only surfaced when relevant.
+// - Adds actions: link + copy (for coupon UX in widget).
+
 import fs from "fs";
 import path from "path";
 
 const ALLOWED_ORIGINS = new Set([
   "https://resell-academy.com",
   "https://www.resell-academy.com",
-  // Ajoute ici tes domaines PayHip si tu utilises un sous-domaine PayHip custom
+  // Ajoute ici tes domaines PayHip si nécessaire
 ]);
+
+const URLS = {
+  SUPPORT: "https://resell-academy.com/contact",
+  FAQ: "https://resell-academy.com/faq",
+  PRODUCTS: {
+    accessoires: "https://resell-academy.com/b/accessoires",
+    vetements: "https://resell-academy.com/b/vetements",
+    chaussures: "https://resell-academy.com/b/chaussures",
+    parfums: "https://resell-academy.com/b/parfums",
+    tech: "https://resell-academy.com/b/tech",
+    bundle: "https://resell-academy.com/b/giga-bundle",
+    blueprint: "https://resell-academy.com/b/OmtC5",
+  },
+};
+
+const PROMOS = {
+  NEW10: {
+    code: "NEW10",
+    label: "NEW10",
+    description: "-10% sur le premier pack",
+    appliesTo: "packs_only", // (hors Giga Bundle)
+  },
+  GIGA15: {
+    code: "GIGA15",
+    label: "GIGA15",
+    description: "-15% sur le Giga Bundle uniquement",
+    appliesTo: "giga_bundle_only",
+  },
+};
 
 /** ---------------------------
  * CORS
@@ -30,7 +69,6 @@ const RL_MAX_REQ = 30;
 const buckets = new Map();
 
 function getClientKey(req) {
-  // Best-effort: IP (varies on Vercel) + UA
   const ip =
     req.headers["x-forwarded-for"]?.toString().split(",")[0]?.trim() ||
     req.socket?.remoteAddress ||
@@ -59,7 +97,7 @@ function rateLimit(req) {
 }
 
 /** ---------------------------
- * Knowledge loader
+ * Knowledge loader (optional file)
  * --------------------------*/
 function loadKnowledge() {
   try {
@@ -67,13 +105,27 @@ function loadKnowledge() {
     const text = fs.readFileSync(filePath, "utf8");
     if (!text || !text.trim()) return { text: "", warning: "KB file empty" };
     return { text, warning: null };
-  } catch (e) {
+  } catch {
     return { text: "", warning: "KB file not found/readable" };
   }
 }
 
 /** ---------------------------
- * Cards (MVP deterministic)
+ * Official products (KB v3 — never invent)
+ * --------------------------*/
+const OFFICIAL_PRODUCTS = [
+  "Pack Parfums",
+  "Pack Tech",
+  "Pack Accessoires Luxe",
+  "Pack Chaussures",
+  "Pack Vêtements",
+  "Giga Bundle",
+  "Resell Blueprint",
+];
+
+/** ---------------------------
+ * Product cards (deterministic)
+ * Price intentionally set to "Voir prix" to avoid hallucinating prices.
  * --------------------------*/
 const PRODUCT_CARDS = {
   accessoires: {
@@ -82,7 +134,7 @@ const PRODUCT_CARDS = {
     price: "Voir prix",
     cover:
       "https://cdn.shopify.com/s/files/1/0973/2368/0110/files/COVER_PACK_ACCESSOIRES.jpg?v=1769183567",
-    url: "https://resell-academy.com/b/accessoires",
+    url: URLS.PRODUCTS.accessoires,
   },
   vetements: {
     key: "vetements",
@@ -90,7 +142,7 @@ const PRODUCT_CARDS = {
     price: "Voir prix",
     cover:
       "https://cdn.shopify.com/s/files/1/0973/2368/0110/files/COVER_PACK_VETEMENTS.jpg?v=1769183578",
-    url: "https://resell-academy.com/b/vetements",
+    url: URLS.PRODUCTS.vetements,
   },
   chaussures: {
     key: "chaussures",
@@ -98,7 +150,7 @@ const PRODUCT_CARDS = {
     price: "Voir prix",
     cover:
       "https://cdn.shopify.com/s/files/1/0973/2368/0110/files/COVER_PACK_CHAUSSURES.jpg?v=1769183578",
-    url: "https://resell-academy.com/b/chaussures",
+    url: URLS.PRODUCTS.chaussures,
   },
   parfums: {
     key: "parfums",
@@ -106,7 +158,7 @@ const PRODUCT_CARDS = {
     price: "Voir prix",
     cover:
       "https://cdn.shopify.com/s/files/1/0973/2368/0110/files/pack_parfums.jpg?v=1769183588",
-    url: "https://resell-academy.com/b/parfums",
+    url: URLS.PRODUCTS.parfums,
   },
   tech: {
     key: "tech",
@@ -114,7 +166,7 @@ const PRODUCT_CARDS = {
     price: "Voir prix",
     cover:
       "https://cdn.shopify.com/s/files/1/0973/2368/0110/files/Copy_of_Copy_of_COVER_PACK_CHAUSSURES.jpg?v=1769183564",
-    url: "https://resell-academy.com/b/tech",
+    url: URLS.PRODUCTS.tech,
   },
   bundle: {
     key: "bundle",
@@ -122,66 +174,164 @@ const PRODUCT_CARDS = {
     price: "Voir prix",
     cover:
       "https://cdn.shopify.com/s/files/1/0973/2368/0110/files/COVER_GIGA_BUNDLE_V2_GIF.png?v=1769183604",
-    url: "https://resell-academy.com/b/giga-bundle",
+    url: URLS.PRODUCTS.bundle,
   },
   blueprint: {
     key: "blueprint",
     title: "Resell Blueprint",
-    price: "15€",
+    price: "Voir prix",
     cover:
       "https://cdn.shopify.com/s/files/1/0973/2368/0110/files/COVER_SECONDAIRE_RESELL_BLUEPRINT.jpg?v=1769183606",
-    url: "https://resell-academy.com/b/OmtC5",
+    url: URLS.PRODUCTS.blueprint,
   },
 };
 
-function shouldSuggestCards(userText) {
-  const t = userText.toLowerCase();
+/** ---------------------------
+ * Intent helpers
+ * --------------------------*/
+function norm(s) {
+  return (s || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+}
 
-  // 1) intention d’achat / demande packs
-  const wantsPacks =
-    t.includes("pack") ||
-    t.includes("bundle") ||
-    t.includes("giga") ||
-    t.includes("blueprint") ||
-    t.includes("prix") ||
-    t.includes("acheter") ||
-    t.includes("commande") ||
-    t.includes("tu recommandes") ||
-    t.includes("recommande");
+function includesAny(t, arr) {
+  return arr.some((k) => t.includes(k));
+}
 
-  if (!wantsPacks) return null;
+function detectIntent(userTextRaw) {
+  const t = norm(userTextRaw);
 
-  // 2) demande explicite "quel pack pour commencer" => accessoires
-  const forStart =
-    t.includes("commencer") || t.includes("début") || t.includes("debutant") || t.includes("débutant");
-  if (forStart) return { type: "single", key: "accessoires" };
+  const intent = {
+    wantsSupport: includesAny(t, ["support", "contact", "aide", "probleme", "bug", "erreur", "404"]),
+    wantsFaq: includesAny(t, ["faq", "question", "questions", "comment ca marche", "comment ca fonctionne"]),
+    wantsPromo: includesAny(t, ["code promo", "promo", "reduction", "reduc", "coupon", "remise", "discount"]),
+    asksAvailablePacks: includesAny(t, ["quels packs", "packs disponibles", "tu vends quoi", "quelles offres", "quels produits"]),
+    wantsAllCards: includesAny(t, ["montre tout", "toutes les offres", "toutes les cartes", "tous les packs", "tout afficher"]),
+    wantsRecommendation: includesAny(t, ["tu recommandes", "recommande", "conseilles", "quel pack choisir", "par ou commencer", "debutant", "debut"]),
+    mentions: {
+      accessoires: includesAny(t, ["accessoire", "accessoires", "luxe accessoire"]),
+      vetements: includesAny(t, ["vetement", "vetements", "vêtement", "vêtements"]),
+      chaussures: includesAny(t, ["chaussure", "chaussures", "sneaker", "baskets"]),
+      parfums: includesAny(t, ["parfum", "parfums", "fragrance"]),
+      tech: includesAny(t, ["tech", "electronique", "électronique", "gadget"]),
+      bundle: includesAny(t, ["giga", "bundle", "giga bundle"]),
+      blueprint: includesAny(t, ["blueprint", "ebook", "e-book", "livre", "guide"]),
+    },
+    purchaseSignals: includesAny(t, ["prix", "acheter", "achat", "lien", "ou acheter", "comment je prends", "checkout", "payer", "cart"]),
+  };
 
-  // 3) mention explicite d’un pack
-  if (t.includes("accessoire")) return { type: "single", key: "accessoires" };
-  if (t.includes("vêtement") || t.includes("vetement")) return { type: "single", key: "vetements" };
-  if (t.includes("chauss")) return { type: "single", key: "chaussures" };
-  if (t.includes("parfum")) return { type: "single", key: "parfums" };
-  if (t.includes("tech")) return { type: "single", key: "tech" };
-  if (t.includes("blueprint")) return { type: "single", key: "blueprint" };
-  if (t.includes("giga")) return { type: "single", key: "bundle" };
-
-  // sinon => tous
-  return { type: "all" };
+  return intent;
 }
 
 /** ---------------------------
- * Logging
+ * Card rules (KB v3)
+ * --------------------------*/
+function planCards(intent) {
+  // A) Recommendation => always Pack Accessoires Luxe + its card
+  if (intent.wantsRecommendation) {
+    return { mode: "single", keys: ["accessoires"] };
+  }
+
+  // B) Pack specific question + purchase intent => send that pack card
+  const packKeys = Object.keys(intent.mentions).filter((k) => intent.mentions[k]);
+  if (packKeys.length === 1 && intent.purchaseSignals) {
+    return { mode: "single", keys: [packKeys[0]] };
+  }
+
+  // C) "Quels packs" => list + up to 1–3 cards, unless explicit all
+  if (intent.asksAvailablePacks) {
+    if (intent.wantsAllCards) {
+      return {
+        mode: "all",
+        keys: ["accessoires", "chaussures", "vetements", "parfums", "tech", "bundle", "blueprint"],
+      };
+    }
+    // Default: 3 best “commercially safe” cards (beginner-friendly + flagship)
+    return { mode: "multi", keys: ["accessoires", "bundle", "blueprint"] };
+  }
+
+  // Promo path: if user is asking promo AND mentions giga/bundle => include bundle card
+  if (intent.wantsPromo && (intent.mentions.bundle || norm("").includes("giga"))) {
+    return { mode: "single", keys: ["bundle"] };
+  }
+
+  // Otherwise: no cards
+  return { mode: "none", keys: [] };
+}
+
+/** ---------------------------
+ * Actions builder
+ * - link actions: open URL
+ * - copy actions: copy code to clipboard (widget should implement)
+ * --------------------------*/
+function buildActions(intent) {
+  const actions = [];
+
+  if (intent.wantsSupport) {
+    actions.push({ type: "link", label: "Contacter le support", url: URLS.SUPPORT });
+  }
+
+  if (intent.wantsFaq) {
+    actions.push({ type: "link", label: "Voir la FAQ", url: URLS.FAQ });
+  }
+
+  if (intent.wantsPromo) {
+    // If user mentions Giga Bundle => prioritize GIGA15
+    if (intent.mentions.bundle || includesAny(norm(intent.raw || ""), ["giga", "bundle"])) {
+      actions.push({
+        type: "copy",
+        label: `Copier ${PROMOS.GIGA15.label}`,
+        value: PROMOS.GIGA15.code,
+        description: PROMOS.GIGA15.description,
+      });
+      actions.push({ type: "link", label: "Ouvrir le Giga Bundle", url: URLS.PRODUCTS.bundle });
+    } else {
+      actions.push({
+        type: "copy",
+        label: `Copier ${PROMOS.NEW10.label}`,
+        value: PROMOS.NEW10.code,
+        description: PROMOS.NEW10.description,
+      });
+      // optional: no forced product link to avoid spam
+    }
+  }
+
+  return actions;
+}
+
+/** ---------------------------
+ * Deterministic promo reply (prevents model from inventing other codes)
+ * --------------------------*/
+function buildPromoReply(intent) {
+  if (!intent.wantsPromo) return null;
+
+  // If asking promo and mentions Giga Bundle => show GIGA15 primarily + mention NEW10 secondarily
+  if (intent.mentions.bundle) {
+    return `Oui : code ${PROMOS.GIGA15.code} (${PROMOS.GIGA15.description}). Si tu prends plutôt un pack individuel, tu as aussi ${PROMOS.NEW10.code} (${PROMOS.NEW10.description}).`;
+  }
+  // Default: show both succinctly
+  return `Oui : ${PROMOS.NEW10.code} (${PROMOS.NEW10.description}) et ${PROMOS.GIGA15.code} (${PROMOS.GIGA15.description}).`;
+}
+
+/** ---------------------------
+ * Deterministic “available packs” reply (never invent)
+ * --------------------------*/
+function buildAvailablePacksReply(intent) {
+  if (!intent.asksAvailablePacks) return null;
+
+  return `Les seuls produits disponibles sont : Pack Parfums, Pack Tech, Pack Accessoires Luxe, Pack Chaussures, Pack Vêtements, le Giga Bundle (tous les packs + bonus) et le Resell Blueprint.`;
+}
+
+/** ---------------------------
+ * Logging (optional)
  * --------------------------*/
 async function logEvent(event) {
   try {
-    // 1) Toujours dans les logs Vercel (simple)
     console.log("[RA_CHAT_EVENT]", JSON.stringify(event));
-
-    // 2) Optionnel: webhook externe (Make/Zapier/Discord/etc.)
-    // Mets RA_LOG_WEBHOOK dans Vercel si tu veux centraliser les conversations.
     const url = process.env.RA_LOG_WEBHOOK;
     if (!url) return;
-
     await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -195,17 +345,14 @@ async function logEvent(event) {
 export default async function handler(req, res) {
   setCors(req, res);
 
-  // Preflight
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
-  // Origin soft-protection
   const origin = req.headers.origin || "";
   if (origin && !ALLOWED_ORIGINS.has(origin)) {
     return res.status(403).json({ error: "Forbidden origin" });
   }
 
-  // Rate limit
   const rl = rateLimit(req);
   res.setHeader("X-RateLimit-Limit", String(RL_MAX_REQ));
   res.setHeader("X-RateLimit-Remaining", String(rl.remaining));
@@ -227,7 +374,7 @@ export default async function handler(req, res) {
     const safeHistory =
       Array.isArray(history) && history.length
         ? history
-            .slice(-8) // garde les 8 derniers pour éviter des prompts énormes
+            .slice(-8)
             .filter(
               (m) =>
                 m &&
@@ -240,29 +387,103 @@ export default async function handler(req, res) {
 
     const { text: knowledgeText, warning } = loadKnowledge();
 
+    const intent = detectIntent(trimmed);
+    intent.raw = trimmed;
+
+    // Cards & actions are deterministic (KB rules)
+    const cardPlan = planCards(intent);
+    const actions = buildActions(intent);
+
+    const cards =
+      cardPlan.mode === "none"
+        ? []
+        : cardPlan.keys.map((k) => PRODUCT_CARDS[k]).filter(Boolean);
+
+    // Deterministic replies for critical “no-hallucination” zones
+    const promoReply = buildPromoReply(intent);
+    const packsReply = buildAvailablePacksReply(intent);
+
+    // If promo/packs/support/faq are the main ask, answer deterministically (short).
+    // Otherwise, use model with strict system constraints + KB context.
+    const deterministicReply =
+      promoReply || packsReply
+        ? (promoReply || packsReply)
+        : null;
+
+    // If user asks only support/faq (and not packs/promo), keep it short and don’t call model.
+    const isPureSupport =
+      (intent.wantsSupport || intent.wantsFaq) &&
+      !intent.asksAvailablePacks &&
+      !intent.wantsPromo &&
+      !intent.wantsRecommendation &&
+      !intent.purchaseSignals;
+
+    if (isPureSupport) {
+      const reply = intent.wantsFaq
+        ? `Je te mets la FAQ ici : ${URLS.FAQ}. Si ta question n’y est pas, tu peux nous contacter ici : ${URLS.SUPPORT}.`
+        : `Tu peux contacter le support ici : ${URLS.SUPPORT}. Si tu veux, la FAQ est là aussi : ${URLS.FAQ}.`;
+
+      await logEvent({
+        type: "message",
+        origin: origin || null,
+        session: req.headers["x-ra-session"] || null,
+        user: trimmed,
+        hasCards: cards.length > 0,
+        mode: "deterministic_support",
+      });
+
+      return res.status(200).json({
+        reply,
+        cards,
+        actions,
+        kbWarning: warning || null,
+      });
+    }
+
+    // If deterministic reply exists (promo/packs), return it without model (safer).
+    if (deterministicReply) {
+      await logEvent({
+        type: "message",
+        origin: origin || null,
+        session: req.headers["x-ra-session"] || null,
+        user: trimmed,
+        hasCards: cards.length > 0,
+        mode: "deterministic_core",
+      });
+
+      return res.status(200).json({
+        reply: deterministicReply,
+        cards,
+        actions,
+        kbWarning: warning || null,
+      });
+    }
+
+    // --- Model path (kept, but hard-railed) ---
     const system = `
 Tu es le chatbot officiel de Resell Academy.
 
-Règles de style:
+STYLE
 - Réponds en français par défaut.
-- Ton: pro mais familial, proche, rassurant.
-- Réponses courtes et actionnables (sauf question complexe).
-- Si tu n'es pas sûr à 100%: ne devine pas, propose support@resell-academy.com.
+- Ton: pro mais familial, mentor, rassurant.
+- Réponses courtes: 2 à 6 lignes max, 1 seul paragraphe si possible.
+- Si la question est complexe: réponds en 2–3 étapes compactes.
 
-Infos clés:
-- Produits 100% digitaux. Accès immédiat après paiement + lien de téléchargement sur le site + email PayHip (reçu / accès).
-- Si email non reçu: vérifier spams/promotions + rechercher "PayHip" + vérifier l'email de paiement. Sinon support@resell-academy.com.
-- Remboursements: si le contenu a été téléchargé => pas de remboursement (sauf cas achat double / achat non autorisé selon KB).
-- Délais (fournisseurs): 7 à 13 jours selon pays.
-- Les liens dans les packs ne sont pas des contacts WhatsApp: ce sont des liens produits DHGate / CNFans.
-- Quand tu parles du créateur, utilise "Space Resell".
+RÈGLES “ANTI-INVENTION”
+- Produits autorisés UNIQUEMENT: ${OFFICIAL_PRODUCTS.join(", ")}.
+- Ne jamais inventer un pack, un bonus, un prix, ou un code promo.
+- Si une info n’est pas dans la KB: dis-le clairement et propose la meilleure alternative (page produit / FAQ / support).
 
-UI Cards (très important):
-- N'affiche PAS de cartes sans raison.
-- Affiche une carte seulement si l'utilisateur demande une recommandation de pack, les packs disponibles, ou montre une intention d'achat.
-- Si l'utilisateur demande "quel pack tu recommandes pour commencer", recommande toujours le Pack Accessoires Luxe (budget bas + facile pour débuter).
+FAITS VALIDÉS
+- Tout est 100% digital: accès à un Google Sheet + un guide d’usage DHGate + CNFans. Aucun produit physique envoyé.
+- DHGate: 7 à 13 jours selon pays.
+- CNFans: dépôt + photos qualité + choix/ paiement de l’expédition finale; délais variables, souvent dans une fourchette similaire selon pays/transport.
+- Space Resell = le créateur (personne). Resell Academy = business.
+- FAQ: ${URLS.FAQ}
+- Support: ${URLS.SUPPORT}
+- Codes promo disponibles (UNIQUEMENT ceux-ci): ${PROMOS.NEW10.code} (${PROMOS.NEW10.description}) et ${PROMOS.GIGA15.code} (${PROMOS.GIGA15.description}).
 
-KNOWLEDGE BASE (source de vérité):
+KNOWLEDGE BASE (source de vérité)
 ${knowledgeText || "(KB vide)"}
     `.trim();
 
@@ -275,7 +496,7 @@ ${knowledgeText || "(KB vide)"}
       },
       body: JSON.stringify({
         model: "claude-3-haiku-20240307",
-        max_tokens: 500,
+        max_tokens: 420,
         system,
         messages: [...safeHistory, { role: "user", content: trimmed }],
       }),
@@ -298,43 +519,22 @@ ${knowledgeText || "(KB vide)"}
     }
 
     const data = await anthropicResp.json();
-    const reply = data?.content?.[0]?.text || "Désolé, je n’ai pas compris. Peux-tu reformuler ?";
+    let reply = data?.content?.[0]?.text || "Désolé, je n’ai pas compris. Peux-tu reformuler ?";
 
-    // Cards logic (MVP deterministic to avoid spam)
-    const cardPlan = shouldSuggestCards(trimmed);
-    let cards = [];
-    if (cardPlan?.type === "single" && PRODUCT_CARDS[cardPlan.key]) {
-      cards = [PRODUCT_CARDS[cardPlan.key]];
-    } else if (cardPlan?.type === "all") {
-      cards = [
-        PRODUCT_CARDS.accessoires,
-        PRODUCT_CARDS.chaussures,
-        PRODUCT_CARDS.vetements,
-        PRODUCT_CARDS.parfums,
-        PRODUCT_CARDS.tech,
-        PRODUCT_CARDS.bundle,
-        PRODUCT_CARDS.blueprint,
-      ];
-    }
-
-    // Actions (boutons intelligents non intrusifs)
-    const t = trimmed.toLowerCase();
-    const actions = [];
-
-    if (t.includes("contact") || t.includes("support") || t.includes("rembourse")) {
-      actions.push({
-        type: "link",
-        label: "Contacter le support",
-        url: "https://resell-academy.com/pages/contact",
-      });
-    }
-
-    if (t.includes("code promo") || t.includes("promo") || t.includes("réduction") || t.includes("reduc")) {
-      actions.push({
-        type: "link",
-        label: "Voir les offres du moment",
-        url: "https://resell-academy.com",
-      });
+    // Post-guard: if model mentions a non-official product name, neutralize (anti-hallucination).
+    // (Simple heuristic: if it contains "Pack" + unknown term, advise official list.)
+    const rNorm = norm(reply);
+    const mentionsPack = rNorm.includes("pack");
+    if (mentionsPack) {
+      const allowedTokens = OFFICIAL_PRODUCTS.map((p) => norm(p));
+      // If it says "pack" but none of the official packs are present, it may have invented.
+      const hasOfficial = allowedTokens.some((tok) => rNorm.includes(tok));
+      if (!hasOfficial && !intent.asksAvailablePacks) {
+        reply =
+          `Je préfère éviter de te donner une info au hasard. Les seuls produits officiels sont : ` +
+          `Pack Parfums, Pack Tech, Pack Accessoires Luxe, Pack Chaussures, Pack Vêtements, ` +
+          `Giga Bundle et Resell Blueprint. Tu veux que je te recommande le meilleur pour commencer ?`;
+      }
     }
 
     await logEvent({
@@ -343,6 +543,7 @@ ${knowledgeText || "(KB vide)"}
       session: req.headers["x-ra-session"] || null,
       user: trimmed,
       hasCards: cards.length > 0,
+      mode: "model",
     });
 
     return res.status(200).json({
